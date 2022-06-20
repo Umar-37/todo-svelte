@@ -1,14 +1,29 @@
 <script type="ts">
-	import type { ITodo } from "../types/todo";
+	import type { FiltersType,ITodo  } from "../types/todo";
+	import {useStorage} from "../stores/useStorage"
+
 	import AddTodo from "./AddTodo.svelte";
 	import Todo from "./Todo.svelte";
+	import TodosLeft from "./TodosLeft.svelte";
+	import FilterTods from "./FilterTodos.svelte";
+	import ClearTodos from "./ClearTodos.svelte";
 	// state
-
 	//you can use types like this or line below it
 	//let todos:ITodo[]= [
-	let todos: Array<ITodo> = [];
+	//let todos: Array<ITodo> = [];
 
-	$: todosAmount = todos.length;
+		//to use localStorage
+		//?? is called Nullish Coalescing.
+	// let todos: Array<ITodo> = JSON.parse(localStorage.getItem('todos')) ?? [];
+	// 	$:{
+	// 		localStorage.setItem('todos',JSON.stringify(todos))
+	// 	}
+
+	let todos=useStorage<ITodo[]>('todos',[]);
+	
+	let selectedFilter:FiltersType='all';
+
+	$: todosAmount = $todos.length;
 	// $:remaing=todos.map(todo=>{
 	// 	if(todo.completed==true)
 	// 	{
@@ -16,11 +31,16 @@
 	// 	}
 	// }) 
 
-	$:remaingTodos=todos.filter(todo=>{
+	//same thing---
+	$:incompleteTodos=$todos.filter(todo=>!todo.completed).length
+	$:remaingTodos=$todos.filter(todo=>{
 		if(!todo.completed){
 		return todo
 		}
 	}).length
+	//-------------
+	$:filteredTodos=filterTodos($todos,selectedFilter);
+	$:completedTodos=$todos.filter(todo=>todo.completed).length
 
 	//methods
 	function genrateRandomNumbers(): string {
@@ -35,20 +55,20 @@
 			completed: false,
 		};
 
-		todos = [...todos, newTodo];
+		$todos = [...$todos, newTodo];
 	}
 	//to toggle all todos
 	function toggleCompleted(event: MouseEvent): void {
 		let { checked } = event.target as HTMLInputElement;
 		//read the comment below the right answer to understand the map thing
 		//https://stackoverflow.com/questions/47841899/js-map-return-object
-		todos = todos.map((todo) => ({
+		$todos = $todos.map((todo) => ({
 			...todo,
 			completed: checked,
 		}));
 	}
 	function completeTodo(id: string): void {
-		todos = todos.map((todo) => {
+		$todos = $todos.map((todo) => {
 			if (todo.id == id) {
 				todo.completed = !todo.completed;
 			}
@@ -63,19 +83,37 @@
 		// })
 	}
 	function removeTodo(id: string): void {
-		todos = todos.filter((todo) => {
+		$todos = $todos.filter((todo) => {
 			return todo.id !== id;
 		});
 	}
 	function editTodo(id:string,content:string):void{
-		let theIndex=todos.findIndex(todo=>todo.id===id)
+		let theIndex=$todos.findIndex(todo=>todo.id===id)
 		todos[theIndex].text=content;
 	}
 	
+	function setFilter(newFilter:FiltersType):void{
+		selectedFilter=newFilter;
+	}
+
+	function filterTodos(todos:ITodo[],filter:FiltersType):ITodo[]{
+		switch(filter){
+			case 'all':
+				return todos;//no need to break,because using return 
+			case 'active':
+				return todos.filter(todo=>!todo.completed);
+			case 'completed':
+				return todos.filter(todo=>todo.completed);
+		}
+	}
+
+	function clearCompleted():void{
+		$todos=$todos.filter(todo=>todo.completed!==true)
+	}
 </script>
 
 <main>
-	<h1 class="title">todos</h1>
+	<h1 class="title">Todos</h1>
 
 	<section class="todos">
 		<AddTodo {addTodo} {toggleCompleted} {todosAmount} />
@@ -84,27 +122,25 @@
 			<!-- content here -->
 			<ul>
 				<!-- remove the id and see what will happen -->
-				{#each todos as todo (todo.id)}
+				{#each filteredTodos as todo (todo.id)}
 					<!-- content here -->
 					<Todo {todo} {completeTodo} {removeTodo} {editTodo}/>
 				{/each}
 			</ul>
 
 			<div class="actions">
-				<span class="todo-count">{remaingTodos} left</span>
-				<div class="filters">
-					<button class="filter">All</button>
-					<button class="filter">Active</button>
-					<button class="filter">Conpleted</button>
-				</div>
-				<button class="clear-completed">Clear completed</button>
+
+				<!-- same thing -->
+				<TodosLeft remaingTodos={incompleteTodos}/>
+				<!--  -->
+				<FilterTods {selectedFilter} {setFilter} />	
+				<ClearTodos {clearCompleted} {completedTodos}/>
 			</div>
 		{/if}
 	</section>
 </main>
 
 <style global lang="postcss">
-	/* Todos */
 	.title {
 		font-size: var(--font-80);
 		font-weight: inherit;
@@ -239,25 +275,5 @@
 		display: block;
 	}
 
-	/* Filters */
 
-	.filters {
-		display: flex;
-		gap: var(--spacing-4);
-	}
-
-	.filter {
-		text-transform: capitalize;
-		padding: var(--spacing-4) var(--spacing-8);
-		border: 1px solid transparent;
-		border-radius: var(--radius-base);
-	}
-
-	.filter:hover {
-		border: 1px solid var(--color-highlight);
-	}
-
-	.selected {
-		border-color: var(--color-highlight);
-	}
 </style>

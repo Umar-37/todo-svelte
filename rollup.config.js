@@ -42,7 +42,7 @@ export default {
 		svelte({
 			preprocess: sveltePreprocess({ sourceMap: !production 
 			,postcss: {//this line adds by me remove it if its taking so much time
-          plugins: [require('tailwindcss')(), require('autoprefixer')()],}//also this
+            plugins: [require('tailwindcss')(), require('autoprefixer')()],}//also this
 		}),
 			compilerOptions: {
 				// enable run-time checks when not in production
