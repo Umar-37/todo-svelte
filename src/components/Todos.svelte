@@ -7,6 +7,7 @@
 	import TodosLeft from "./TodosLeft.svelte";
 	import FilterTods from "./FilterTodos.svelte";
 	import ClearTodos from "./ClearTodos.svelte";
+	import autoAnimate from "@formkit/auto-animate";
 	// state
 	//you can use types like this or line below it
 	//let todos:ITodo[]= [
@@ -89,7 +90,9 @@
 	}
 	function editTodo(id:string,content:string):void{
 		let theIndex=$todos.findIndex(todo=>todo.id===id)
-		todos[theIndex].text=content;
+		
+		
+		$todos[theIndex].text=content;
 	}
 	
 	function setFilter(newFilter:FiltersType):void{
@@ -120,7 +123,7 @@
 
 		{#if todosAmount}
 			<!-- content here -->
-			<ul>
+			<ul use:autoAnimate>
 				<!-- remove the id and see what will happen -->
 				{#each filteredTodos as todo (todo.id)}
 					<!-- content here -->

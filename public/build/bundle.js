@@ -46,6 +46,9 @@ var app = (function () {
         store.set(value);
         return ret;
     }
+    function action_destroyer(action_result) {
+        return action_result && is_function(action_result.destroy) ? action_result.destroy : noop;
+    }
     function append(target, node) {
         target.appendChild(node);
     }
@@ -1687,6 +1690,499 @@ var app = (function () {
     	}
     }
 
+    /**
+     * A set of all the parents currently being observe. This is the only non weak
+     * registry.
+     */
+    const parents = new Set();
+    /**
+     * Element coordinates that is constantly kept up to date.
+     */
+    const coords = new WeakMap();
+    /**
+     * Siblings of elements that have been removed from the dom.
+     */
+    const siblings = new WeakMap();
+    /**
+     * Animations that are currently running.
+     */
+    const animations = new WeakMap();
+    /**
+     * A map of existing intersection observers used to track element movements.
+     */
+    const intersections = new WeakMap();
+    /**
+     * Intervals for automatically checking the position of elements occasionally.
+     */
+    const intervals = new WeakMap();
+    /**
+     * The configuration options for each group of elements.
+     */
+    const options = new WeakMap();
+    /**
+     * Debounce counters by id, used to debounce calls to update positions.
+     */
+    const debounces = new WeakMap();
+    /**
+     * The document used to calculate transitions.
+     */
+    let root;
+    /**
+     * Used to sign an element as the target.
+     */
+    const TGT = "__aa_tgt";
+    /**
+     * Used to sign an element as being part of a removal.
+     */
+    const DEL = "__aa_del";
+    /**
+     * Callback for handling all mutations.
+     * @param mutations - A mutation list
+     */
+    const handleMutations = (mutations) => {
+        const elements = getElements(mutations);
+        // If elements is "false" that means this mutation that should be ignored.
+        if (elements) {
+            elements.forEach((el) => animate(el));
+        }
+    };
+    /**
+     *
+     * @param entries - Elements that have been resized.
+     */
+    const handleResizes = (entries) => {
+        entries.forEach((entry) => {
+            if (entry.target === root)
+                updateAllPos();
+            if (coords.has(entry.target))
+                updatePos(entry.target);
+        });
+    };
+    /**
+     * Observe this elements position.
+     * @param el - The element to observe the position of.
+     */
+    function observePosition(el) {
+        const oldObserver = intersections.get(el);
+        oldObserver === null || oldObserver === void 0 ? void 0 : oldObserver.disconnect();
+        let rect = coords.get(el);
+        let invocations = 0;
+        const buffer = 5;
+        if (!rect) {
+            rect = getCoords(el);
+            coords.set(el, rect);
+        }
+        const { offsetWidth, offsetHeight } = root;
+        const rootMargins = [
+            rect.top - buffer,
+            offsetWidth - (rect.left + buffer + rect.width),
+            offsetHeight - (rect.top + buffer + rect.height),
+            rect.left - buffer,
+        ];
+        const rootMargin = rootMargins
+            .map((px) => `${-1 * Math.floor(px)}px`)
+            .join(" ");
+        const observer = new IntersectionObserver(() => {
+            ++invocations > 1 && updatePos(el);
+        }, {
+            root,
+            threshold: 1,
+            rootMargin,
+        });
+        observer.observe(el);
+        intersections.set(el, observer);
+    }
+    /**
+     * Update the exact position of a given element.
+     * @param el - An element to update the position of.
+     */
+    function updatePos(el) {
+        clearTimeout(debounces.get(el));
+        const optionsOrPlugin = getOptions(el);
+        const delay = typeof optionsOrPlugin === "function" ? 500 : optionsOrPlugin.duration;
+        debounces.set(el, setTimeout(() => {
+            const currentAnimation = animations.get(el);
+            if (!currentAnimation || currentAnimation.finished) {
+                coords.set(el, getCoords(el));
+                observePosition(el);
+            }
+        }, delay));
+    }
+    /**
+     * Updates all positions that are currently being tracked.
+     */
+    function updateAllPos() {
+        clearTimeout(debounces.get(root));
+        debounces.set(root, setTimeout(() => {
+            parents.forEach((parent) => forEach(parent, (el) => lowPriority(() => updatePos(el))));
+        }, 100));
+    }
+    /**
+     * Its possible for a quick scroll or other fast events to get past the
+     * intersection observer, so occasionally we need want "cold-poll" for the
+     * latests and greatest position. We try to do this in the most non-disruptive
+     * fashion possible. First we only do this ever couple seconds, staggard by a
+     * random offset.
+     * @param el - Element
+     */
+    function poll(el) {
+        setTimeout(() => {
+            intervals.set(el, setInterval(() => lowPriority(updatePos.bind(null, el)), 2000));
+        }, Math.round(2000 * Math.random()));
+    }
+    /**
+     * Perform some operation that is non critical at some point.
+     * @param callback
+     */
+    function lowPriority(callback) {
+        if (typeof requestIdleCallback === "function") {
+            requestIdleCallback(() => callback());
+        }
+        else {
+            requestAnimationFrame(() => callback());
+        }
+    }
+    /**
+     * The mutation observer responsible for watching each root element.
+     */
+    let mutations;
+    /**
+     * A resize observer, responsible for recalculating elements on resize.
+     */
+    let resize;
+    /**
+     * If this is in a browser, initialize our Web APIs
+     */
+    if (typeof window !== "undefined") {
+        root = document.documentElement;
+        mutations = new MutationObserver(handleMutations);
+        resize = new ResizeObserver(handleResizes);
+        resize.observe(root);
+    }
+    /**
+     * Retrieves all the elements that may have been affected by the last mutation
+     * including ones that have been removed and are no longer in the DOM.
+     * @param mutations - A mutation list.
+     * @returns
+     */
+    function getElements(mutations) {
+        return mutations.reduce((elements, mutation) => {
+            // Short circuit if we find a purposefully deleted node.
+            if (elements === false)
+                return false;
+            if (mutation.target instanceof Element) {
+                target(mutation.target);
+                if (!elements.has(mutation.target)) {
+                    elements.add(mutation.target);
+                    for (let i = 0; i < mutation.target.children.length; i++) {
+                        const child = mutation.target.children.item(i);
+                        if (!child)
+                            continue;
+                        if (DEL in child)
+                            return false;
+                        target(mutation.target, child);
+                        elements.add(child);
+                    }
+                }
+                if (mutation.removedNodes.length) {
+                    for (let i = 0; i < mutation.removedNodes.length; i++) {
+                        const child = mutation.removedNodes[i];
+                        if (DEL in child)
+                            return false;
+                        if (child instanceof Element) {
+                            elements.add(child);
+                            target(mutation.target, child);
+                            siblings.set(child, [
+                                mutation.previousSibling,
+                                mutation.nextSibling,
+                            ]);
+                        }
+                    }
+                }
+            }
+            return elements;
+        }, new Set());
+    }
+    /**
+     *
+     * @param el - The root element
+     * @param child
+     */
+    function target(el, child) {
+        if (!child && !(TGT in el))
+            Object.defineProperty(el, TGT, { value: el });
+        else if (child && !(TGT in child))
+            Object.defineProperty(child, TGT, { value: el });
+    }
+    /**
+     * Determines what kind of change took place on the given element and then
+     * performs the proper animation based on that.
+     * @param el - The specific element to animate.
+     */
+    function animate(el) {
+        var _a;
+        const isMounted = root.contains(el);
+        const preExisting = coords.has(el);
+        if (isMounted && siblings.has(el))
+            siblings.delete(el);
+        if (animations.has(el)) {
+            (_a = animations.get(el)) === null || _a === void 0 ? void 0 : _a.cancel();
+        }
+        if (preExisting && isMounted) {
+            remain(el);
+        }
+        else if (preExisting && !isMounted) {
+            remove(el);
+        }
+        else {
+            add(el);
+        }
+    }
+    /**
+     * Removes all non-digits from a string and casts to a number.
+     * @param str - A string containing a pixel value.
+     * @returns
+     */
+    function raw(str) {
+        return Number(str.replace(/[^0-9.\-]/g, ""));
+    }
+    /**
+     * Get the coordinates of elements adjusted for scroll position.
+     * @param el - Element
+     * @returns
+     */
+    function getCoords(el) {
+        const rect = el.getBoundingClientRect();
+        return {
+            top: rect.top + window.scrollY,
+            left: rect.left + window.scrollX,
+            width: rect.width,
+            height: rect.height,
+        };
+    }
+    /**
+     * Returns the width/height that the element should be transitioned between.
+     * This takes into account box-sizing.
+     * @param el - Element being animated
+     * @param oldCoords - Old set of Coordinates coordinates
+     * @param newCoords - New set of Coordinates coordinates
+     * @returns
+     */
+    function getTransitionSizes(el, oldCoords, newCoords) {
+        let widthFrom = oldCoords.width;
+        let heightFrom = oldCoords.height;
+        let widthTo = newCoords.width;
+        let heightTo = newCoords.height;
+        const styles = getComputedStyle(el);
+        const sizing = styles.getPropertyValue("box-sizing");
+        if (sizing === "content-box") {
+            const paddingY = raw(styles.paddingTop) +
+                raw(styles.paddingBottom) +
+                raw(styles.borderTopWidth) +
+                raw(styles.borderBottomWidth);
+            const paddingX = raw(styles.paddingLeft) +
+                raw(styles.paddingRight) +
+                raw(styles.borderRightWidth) +
+                raw(styles.borderLeftWidth);
+            widthFrom -= paddingX;
+            widthTo -= paddingX;
+            heightFrom -= paddingY;
+            heightTo -= paddingY;
+        }
+        return [widthFrom, widthTo, heightFrom, heightTo].map(Math.round);
+    }
+    /**
+     * Retrieves animation options for the current element.
+     * @param el - Element to retrieve options for.
+     * @returns
+     */
+    function getOptions(el) {
+        return TGT in el && options.has(el[TGT])
+            ? options.get(el[TGT])
+            : { duration: 250, easing: "ease-in-out" };
+    }
+    /**
+     * Iterate over the children of a given parent.
+     * @param parent - A parent element
+     * @param callback - A callback
+     */
+    function forEach(parent, ...callbacks) {
+        callbacks.forEach((callback) => callback(parent, options.has(parent)));
+        for (let i = 0; i < parent.children.length; i++) {
+            const child = parent.children.item(i);
+            if (child) {
+                callbacks.forEach((callback) => callback(child, options.has(child)));
+            }
+        }
+    }
+    /**
+     * The element in question is remaining in the DOM.
+     * @param el - Element to flip
+     * @returns
+     */
+    function remain(el) {
+        const oldCoords = coords.get(el);
+        const newCoords = getCoords(el);
+        let animation;
+        if (!oldCoords)
+            return;
+        const pluginOrOptions = getOptions(el);
+        if (typeof pluginOrOptions !== "function") {
+            const deltaX = oldCoords.left - newCoords.left;
+            const deltaY = oldCoords.top - newCoords.top;
+            const [widthFrom, widthTo, heightFrom, heightTo] = getTransitionSizes(el, oldCoords, newCoords);
+            const start = {
+                transform: `translate(${deltaX}px, ${deltaY}px)`,
+            };
+            const end = {
+                transform: `translate(0, 0)`,
+            };
+            if (widthFrom !== widthTo) {
+                start.width = `${widthFrom}px`;
+                end.width = `${widthTo}px`;
+            }
+            if (heightFrom !== heightTo) {
+                start.height = `${heightFrom}px`;
+                end.height = `${heightTo}px`;
+            }
+            animation = el.animate([start, end], pluginOrOptions);
+        }
+        else {
+            animation = new Animation(pluginOrOptions(el, "remain", oldCoords, newCoords));
+            animation.play();
+        }
+        animations.set(el, animation);
+        coords.set(el, newCoords);
+        animation.addEventListener("finish", updatePos.bind(null, el));
+    }
+    /**
+     * Adds the element with a transition.
+     * @param el - Animates the element being added.
+     */
+    function add(el) {
+        const newCoords = getCoords(el);
+        coords.set(el, newCoords);
+        const pluginOrOptions = getOptions(el);
+        let animation;
+        if (typeof pluginOrOptions !== "function") {
+            animation = el.animate([
+                { transform: "scale(.98)", opacity: 0 },
+                { transform: "scale(0.98)", opacity: 0, offset: 0.5 },
+                { transform: "scale(1)", opacity: 1 },
+            ], {
+                duration: pluginOrOptions.duration * 1.5,
+                easing: "ease-in",
+            });
+        }
+        else {
+            animation = new Animation(pluginOrOptions(el, "add", newCoords));
+            animation.play();
+        }
+        animations.set(el, animation);
+        animation.addEventListener("finish", updatePos.bind(null, el));
+    }
+    /**
+     * Animates the removal of an element.
+     * @param el - Element to remove
+     */
+    function remove(el) {
+        if (!siblings.has(el) || !coords.has(el))
+            return;
+        const [prev, next] = siblings.get(el);
+        Object.defineProperty(el, DEL, { value: true });
+        if (next && next.parentNode && next.parentNode instanceof Element) {
+            next.parentNode.insertBefore(el, next);
+        }
+        else if (prev && prev.parentNode) {
+            prev.parentNode.appendChild(el);
+        }
+        const [top, left, width, height] = deletePosition(el);
+        const optionsOrPlugin = getOptions(el);
+        const oldCoords = coords.get(el);
+        let animation;
+        Object.assign(el.style, {
+            position: "absolute",
+            top: `${top}px`,
+            left: `${left}px`,
+            width: `${width}px`,
+            height: `${height}px`,
+            margin: 0,
+            pointerEvents: "none",
+            transformOrigin: "center",
+            zIndex: 100,
+        });
+        if (typeof optionsOrPlugin !== "function") {
+            animation = el.animate([
+                {
+                    transform: "scale(1)",
+                    opacity: 1,
+                },
+                {
+                    transform: "scale(.98)",
+                    opacity: 0,
+                },
+            ], { duration: optionsOrPlugin.duration, easing: "ease-out" });
+        }
+        else {
+            animation = new Animation(optionsOrPlugin(el, "remove", oldCoords));
+            animation.play();
+        }
+        animations.set(el, animation);
+        animation.addEventListener("finish", () => {
+            var _a;
+            el.remove();
+            coords.delete(el);
+            siblings.delete(el);
+            animations.delete(el);
+            (_a = intersections.get(el)) === null || _a === void 0 ? void 0 : _a.disconnect();
+        });
+    }
+    function deletePosition(el) {
+        const oldCoords = coords.get(el);
+        const [width, , height] = getTransitionSizes(el, oldCoords, getCoords(el));
+        let offsetParent = el.parentElement;
+        while (offsetParent &&
+            (getComputedStyle(offsetParent).position === "static" ||
+                offsetParent instanceof HTMLBodyElement)) {
+            offsetParent = offsetParent.parentElement;
+        }
+        if (!offsetParent)
+            offsetParent = document.body;
+        const parentStyles = getComputedStyle(offsetParent);
+        const parentCoords = coords.get(offsetParent) || getCoords(offsetParent);
+        const top = Math.round(oldCoords.top - parentCoords.top) -
+            raw(parentStyles.borderTopWidth);
+        const left = Math.round(oldCoords.left - parentCoords.left) -
+            raw(parentStyles.borderLeftWidth);
+        return [top, left, width, height];
+    }
+    /**
+     * A function that automatically adds animation effects to itself and its
+     * immediate children. Specifically it adds effects for adding, moving, and
+     * removing DOM elements.
+     * @param el - A parent element to add animations to.
+     * @param options - An optional object of options.
+     */
+    function autoAnimate(el, config = {}) {
+        if (mutations && resize) {
+            const mediaQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+            if (mediaQuery.matches)
+                return;
+            if (getComputedStyle(el).position === "static") {
+                Object.assign(el.style, { position: "relative" });
+            }
+            forEach(el, updatePos, poll, (element) => resize === null || resize === void 0 ? void 0 : resize.observe(element));
+            if (typeof config === "function") {
+                options.set(el, config);
+            }
+            else {
+                options.set(el, { duration: 250, easing: "ease-in-out", ...config });
+            }
+            mutations.observe(el, { childList: true });
+            parents.add(el);
+        }
+    }
+
     /* src/components/Todos.svelte generated by Svelte v3.46.4 */
 
     const { Object: Object_1 } = globals;
@@ -1698,7 +2194,7 @@ var app = (function () {
     	return child_ctx;
     }
 
-    // (105:2) {#if todosAmount}
+    // (106:2) {#if todosAmount}
     function create_if_block(ctx) {
     	let ul;
     	let each_blocks = [];
@@ -1711,7 +2207,9 @@ var app = (function () {
     	let t2;
     	let cleartodos;
     	let current;
-    	let each_value = /*filteredTodos*/ ctx[3];
+    	let mounted;
+    	let dispose;
+    	let each_value = /*filteredTodos*/ ctx[2];
     	validate_each_argument(each_value);
     	const get_key = ctx => /*todo*/ ctx[15].id;
     	validate_each_keys(ctx, each_value, get_each_context, get_key);
@@ -1723,7 +2221,7 @@ var app = (function () {
     	}
 
     	todosleft = new TodosLeft({
-    			props: { remaingTodos: /*incompleteTodos*/ ctx[4] },
+    			props: { remaingTodos: /*incompleteTodos*/ ctx[3] },
     			$$inline: true
     		});
 
@@ -1738,7 +2236,7 @@ var app = (function () {
     	cleartodos = new ClearTodos({
     			props: {
     				clearCompleted: /*clearCompleted*/ ctx[12],
-    				completedTodos: /*completedTodos*/ ctx[2]
+    				completedTodos: /*completedTodos*/ ctx[1]
     			},
     			$$inline: true
     		});
@@ -1758,9 +2256,9 @@ var app = (function () {
     			create_component(filtertods.$$.fragment);
     			t2 = space();
     			create_component(cleartodos.$$.fragment);
-    			add_location(ul, file$1, 106, 3, 3089);
+    			add_location(ul, file$1, 107, 3, 3139);
     			attr_dev(div, "class", "actions");
-    			add_location(div, file$1, 114, 3, 3301);
+    			add_location(div, file$1, 115, 3, 3367);
     		},
     		m: function mount(target, anchor) {
     			insert_dev(target, ul, anchor);
@@ -1777,10 +2275,15 @@ var app = (function () {
     			append_dev(div, t2);
     			mount_component(cleartodos, div, null);
     			current = true;
+
+    			if (!mounted) {
+    				dispose = action_destroyer(autoAnimate.call(null, ul));
+    				mounted = true;
+    			}
     		},
     		p: function update(ctx, dirty) {
-    			if (dirty & /*filteredTodos, completeTodo, removeTodo, editTodo*/ 1800) {
-    				each_value = /*filteredTodos*/ ctx[3];
+    			if (dirty & /*filteredTodos, completeTodo, removeTodo, editTodo*/ 1796) {
+    				each_value = /*filteredTodos*/ ctx[2];
     				validate_each_argument(each_value);
     				group_outros();
     				validate_each_keys(ctx, each_value, get_each_context, get_key);
@@ -1789,13 +2292,13 @@ var app = (function () {
     			}
 
     			const todosleft_changes = {};
-    			if (dirty & /*incompleteTodos*/ 16) todosleft_changes.remaingTodos = /*incompleteTodos*/ ctx[4];
+    			if (dirty & /*incompleteTodos*/ 8) todosleft_changes.remaingTodos = /*incompleteTodos*/ ctx[3];
     			todosleft.$set(todosleft_changes);
     			const filtertods_changes = {};
     			if (dirty & /*selectedFilter*/ 1) filtertods_changes.selectedFilter = /*selectedFilter*/ ctx[0];
     			filtertods.$set(filtertods_changes);
     			const cleartodos_changes = {};
-    			if (dirty & /*completedTodos*/ 4) cleartodos_changes.completedTodos = /*completedTodos*/ ctx[2];
+    			if (dirty & /*completedTodos*/ 2) cleartodos_changes.completedTodos = /*completedTodos*/ ctx[1];
     			cleartodos.$set(cleartodos_changes);
     		},
     		i: function intro(local) {
@@ -1832,6 +2335,8 @@ var app = (function () {
     			destroy_component(todosleft);
     			destroy_component(filtertods);
     			destroy_component(cleartodos);
+    			mounted = false;
+    			dispose();
     		}
     	};
 
@@ -1839,14 +2344,14 @@ var app = (function () {
     		block,
     		id: create_if_block.name,
     		type: "if",
-    		source: "(105:2) {#if todosAmount}",
+    		source: "(106:2) {#if todosAmount}",
     		ctx
     	});
 
     	return block;
     }
 
-    // (109:4) {#each filteredTodos as todo (todo.id)}
+    // (110:4) {#each filteredTodos as todo (todo.id)}
     function create_each_block(key_1, ctx) {
     	let first;
     	let todo;
@@ -1878,7 +2383,7 @@ var app = (function () {
     		p: function update(new_ctx, dirty) {
     			ctx = new_ctx;
     			const todo_changes = {};
-    			if (dirty & /*filteredTodos*/ 8) todo_changes.todo = /*todo*/ ctx[15];
+    			if (dirty & /*filteredTodos*/ 4) todo_changes.todo = /*todo*/ ctx[15];
     			todo.$set(todo_changes);
     		},
     		i: function intro(local) {
@@ -1900,7 +2405,7 @@ var app = (function () {
     		block,
     		id: create_each_block.name,
     		type: "each",
-    		source: "(109:4) {#each filteredTodos as todo (todo.id)}",
+    		source: "(110:4) {#each filteredTodos as todo (todo.id)}",
     		ctx
     	});
 
@@ -1920,12 +2425,12 @@ var app = (function () {
     			props: {
     				addTodo: /*addTodo*/ ctx[6],
     				toggleCompleted: /*toggleCompleted*/ ctx[7],
-    				todosAmount: /*todosAmount*/ ctx[5]
+    				todosAmount: /*todosAmount*/ ctx[4]
     			},
     			$$inline: true
     		});
 
-    	let if_block = /*todosAmount*/ ctx[5] && create_if_block(ctx);
+    	let if_block = /*todosAmount*/ ctx[4] && create_if_block(ctx);
 
     	const block = {
     		c: function create() {
@@ -1938,10 +2443,10 @@ var app = (function () {
     			t2 = space();
     			if (if_block) if_block.c();
     			attr_dev(h1, "class", "title");
-    			add_location(h1, file$1, 99, 1, 2929);
+    			add_location(h1, file$1, 100, 1, 2979);
     			attr_dev(section, "class", "todos");
-    			add_location(section, file$1, 101, 1, 2960);
-    			add_location(main, file$1, 98, 0, 2921);
+    			add_location(section, file$1, 102, 1, 3010);
+    			add_location(main, file$1, 99, 0, 2971);
     		},
     		l: function claim(nodes) {
     			throw new Error("options.hydrate only works if the component was compiled with the `hydratable: true` option");
@@ -1958,14 +2463,14 @@ var app = (function () {
     		},
     		p: function update(ctx, [dirty]) {
     			const addtodo_changes = {};
-    			if (dirty & /*todosAmount*/ 32) addtodo_changes.todosAmount = /*todosAmount*/ ctx[5];
+    			if (dirty & /*todosAmount*/ 16) addtodo_changes.todosAmount = /*todosAmount*/ ctx[4];
     			addtodo.$set(addtodo_changes);
 
-    			if (/*todosAmount*/ ctx[5]) {
+    			if (/*todosAmount*/ ctx[4]) {
     				if (if_block) {
     					if_block.p(ctx, dirty);
 
-    					if (dirty & /*todosAmount*/ 32) {
+    					if (dirty & /*todosAmount*/ 16) {
     						transition_in(if_block, 1);
     					}
     				} else {
@@ -2095,7 +2600,7 @@ var app = (function () {
 
     	function editTodo(id, content) {
     		let theIndex = $todos.findIndex(todo => todo.id === id);
-    		$$invalidate(1, todos[theIndex].text = content, todos);
+    		set_store_value(todos, $todos[theIndex].text = content, $todos);
     	}
 
     	function setFilter(newFilter) {
@@ -2119,6 +2624,7 @@ var app = (function () {
     		TodosLeft,
     		FilterTods: FilterTodos,
     		ClearTodos,
+    		autoAnimate,
     		todos,
     		selectedFilter,
     		genrateRandomNumbers,
@@ -2139,13 +2645,13 @@ var app = (function () {
     	});
 
     	$$self.$inject_state = $$props => {
-    		if ('todos' in $$props) $$invalidate(1, todos = $$props.todos);
+    		if ('todos' in $$props) $$invalidate(5, todos = $$props.todos);
     		if ('selectedFilter' in $$props) $$invalidate(0, selectedFilter = $$props.selectedFilter);
-    		if ('completedTodos' in $$props) $$invalidate(2, completedTodos = $$props.completedTodos);
-    		if ('filteredTodos' in $$props) $$invalidate(3, filteredTodos = $$props.filteredTodos);
+    		if ('completedTodos' in $$props) $$invalidate(1, completedTodos = $$props.completedTodos);
+    		if ('filteredTodos' in $$props) $$invalidate(2, filteredTodos = $$props.filteredTodos);
     		if ('remaingTodos' in $$props) remaingTodos = $$props.remaingTodos;
-    		if ('incompleteTodos' in $$props) $$invalidate(4, incompleteTodos = $$props.incompleteTodos);
-    		if ('todosAmount' in $$props) $$invalidate(5, todosAmount = $$props.todosAmount);
+    		if ('incompleteTodos' in $$props) $$invalidate(3, incompleteTodos = $$props.incompleteTodos);
+    		if ('todosAmount' in $$props) $$invalidate(4, todosAmount = $$props.todosAmount);
     	};
 
     	if ($$props && "$$inject" in $$props) {
@@ -2154,7 +2660,7 @@ var app = (function () {
 
     	$$self.$$.update = () => {
     		if ($$self.$$.dirty & /*$todos*/ 8192) {
-    			$$invalidate(5, todosAmount = $todos.length);
+    			$$invalidate(4, todosAmount = $todos.length);
     		}
 
     		if ($$self.$$.dirty & /*$todos*/ 8192) {
@@ -2165,7 +2671,7 @@ var app = (function () {
     			// 	}
     			// }) 
     			//same thing---
-    			$$invalidate(4, incompleteTodos = $todos.filter(todo => !todo.completed).length);
+    			$$invalidate(3, incompleteTodos = $todos.filter(todo => !todo.completed).length);
     		}
 
     		if ($$self.$$.dirty & /*$todos*/ 8192) {
@@ -2178,21 +2684,21 @@ var app = (function () {
 
     		if ($$self.$$.dirty & /*$todos, selectedFilter*/ 8193) {
     			//-------------
-    			$$invalidate(3, filteredTodos = filterTodos($todos, selectedFilter));
+    			$$invalidate(2, filteredTodos = filterTodos($todos, selectedFilter));
     		}
 
     		if ($$self.$$.dirty & /*$todos*/ 8192) {
-    			$$invalidate(2, completedTodos = $todos.filter(todo => todo.completed).length);
+    			$$invalidate(1, completedTodos = $todos.filter(todo => todo.completed).length);
     		}
     	};
 
     	return [
     		selectedFilter,
-    		todos,
     		completedTodos,
     		filteredTodos,
     		incompleteTodos,
     		todosAmount,
+    		todos,
     		addTodo,
     		toggleCompleted,
     		completeTodo,
